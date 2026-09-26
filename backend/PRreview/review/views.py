@@ -6,6 +6,13 @@ from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from decouple import config
 
+from .github_service import (
+    list_installation_repos,
+    register_webhook,
+    register_webhooks_bulk,
+    remove_webhook,
+)
+
 logger = logging.getLogger(__name__)
 
 # Retrieve the webhook secret from your .env file
@@ -50,3 +57,111 @@ def github_webhook(request):
             return HttpResponse(status=400, content="Invalid JSON payload")
             
     return HttpResponse(status=405, content="Method Not Allowed")
+
+
+# ---------------------------------------------------------------------------
+# Repos API
+# ---------------------------------------------------------------------------
+
+@csrf_exempt
+def list_repos(request):
+    """
+    GET /api/repos/?installation_id=<id>
+
+    Returns all repositories accessible to a GitHub App installation,
+    including whether our webhook is already registered on each.
+    """
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+    installation_id = request.GET.get('installation_id')
+    if not installation_id:
+        return JsonResponse({'error': 'installation_id query param is required'}, status=400)
+
+    try:
+        repos = list_installation_repos(int(installation_id))
+        return JsonResponse({'repos': repos, 'count': len(repos)})
+    except Exception as e:
+        logger.error(f"list_repos error: {e}")
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+def register_webhooks_view(request):
+    """
+    POST /api/repos/register-webhooks/
+
+    Body (JSON):
+        {
+            "installation_id": 12345678,
+            "repos": ["owner/repo1", "owner/repo2"]
+        }
+
+    Registers our webhook on each specified repo.
+    Returns per-repo results with success/failure info.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+    try:
+        body = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON body'}, status=400)
+
+    installation_id = body.get('installation_id')
+    repos = body.get('repos', [])
+
+    if not installation_id:
+        return JsonResponse({'error': '"installation_id" is required'}, status=400)
+    if not repos or not isinstance(repos, list):
+        return JsonResponse({'error': '"repos" must be a non-empty list of "owner/repo" strings'}, status=400)
+
+    try:
+        results = register_webhooks_bulk(int(installation_id), repos)
+        success_count = sum(1 for r in results if r.get('success'))
+        return JsonResponse({
+            'results': results,
+            'summary': {
+                'total': len(results),
+                'success': success_count,
+                'failed': len(results) - success_count,
+            }
+        })
+    except Exception as e:
+        logger.error(f"register_webhooks_view error: {e}")
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+def remove_webhook_view(request):
+    """
+    DELETE /api/repos/remove-webhook/
+
+    Body (JSON):
+        {
+            "installation_id": 12345678,
+            "repo": "owner/repo"
+        }
+
+    Removes our webhook from the specified repo.
+    """
+    if request.method != 'DELETE':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+    try:
+        body = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON body'}, status=400)
+
+    installation_id = body.get('installation_id')
+    repo = body.get('repo')
+
+    if not installation_id or not repo:
+        return JsonResponse({'error': '"installation_id" and "repo" are required'}, status=400)
+
+    try:
+        result = remove_webhook(int(installation_id), repo)
+        return JsonResponse(result)
+    except Exception as e:
+        logger.error(f"remove_webhook_view error: {e}")
+        return JsonResponse({'error': str(e)}, status=500)

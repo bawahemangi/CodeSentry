@@ -14,3 +14,8 @@ requests==2.32.5
 
 # Production server
 gunicorn==21.2.0
+
+# GitHub App integration
+PyGithub==2.3.0
+PyJWT==2.9.0
+cryptography==42.0.8
