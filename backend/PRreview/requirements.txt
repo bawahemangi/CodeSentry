@@ -1,0 +1,16 @@
+# Django
+Django==5.2.17
+asgiref==3.10.0
+sqlparse==0.5.3
+
+# Environment variable management
+python-decouple==3.8
+
+# PostgreSQL database driver
+psycopg2-binary==2.9.13
+
+# HTTP requests (for GitHub API calls)
+requests==2.32.5
+
+# Production server
+gunicorn==21.2.0
