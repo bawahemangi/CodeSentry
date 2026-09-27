@@ -12,6 +12,7 @@ from .github_service import (
     register_webhooks_bulk,
     remove_webhook,
 )
+from .review_orchestrator import run_pr_review
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +43,43 @@ def github_webhook(request):
             payload = json.loads(request.body)
             event_type = request.headers.get("X-GitHub-Event")
             
-            # Here you can process different events
+            # Handle pull_request events
             if event_type == "pull_request":
                 action = payload.get("action")
                 logger.info(f"Received pull_request event. Action: {action}")
-                # TODO: Trigger the AI review process here!
-                
+
+                # Only review on opened or new commits pushed
+                if action in ("opened", "synchronize", "reopened"):
+                    pr = payload.get("pull_request", {})
+                    repo = payload.get("repository", {})
+                    installation = payload.get("installation", {})
+
+                    try:
+                        review_result = run_pr_review(
+                            installation_id=installation["id"],
+                            repo_full_name=repo["full_name"],
+                            pr_number=pr["number"],
+                            commit_id=pr["head"]["sha"],
+                            pr_title=pr.get("title", ""),
+                            pr_description=pr.get("body") or "",
+                            base_branch=pr["base"]["ref"],
+                            head_branch=pr["head"]["ref"],
+                        )
+                        logger.info(
+                            f"Review posted for PR #{pr['number']}: "
+                            f"verdict={review_result.get('verdict')} "
+                            f"comments={review_result.get('comments_count')}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"PR review failed for {repo.get('full_name')}#{pr.get('number')}: {e}",
+                            exc_info=True,
+                        )
+                        # Don't return 500 — GitHub expects 200 for delivery tracking
+
             elif event_type == "ping":
                 logger.info("Received ping event from GitHub App installation.")
-                
+
             return JsonResponse({"status": "success", "message": f"Processed {event_type} event"})
             
         except json.JSONDecodeError:
