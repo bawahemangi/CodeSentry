@@ -3,8 +3,8 @@ llm_reviewer.py
 ---------------
 LLM prompt design and structured JSON output for AI code review.
 
-Uses Anthropic Claude (claude-3-5-haiku for speed / claude-3-5-sonnet
-for depth). Returns a validated, structured ReviewResult object.
+Uses Google Gemini (gemini-2.5-flash / gemini-1.5-flash free tier).
+Returns a validated, structured ReviewResult object.
 
 STRUCTURED OUTPUT CONTRACT
 ---------------------------
@@ -32,8 +32,16 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-import anthropic
 from decouple import config
+
+try:
+    from google import genai
+    from google.genai import types
+    GEMINI_AVAILABLE = True
+except ImportError:
+    genai = None
+    types = None
+    GEMINI_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +49,8 @@ logger = logging.getLogger(__name__)
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
-ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
-
-# Use haiku for speed (cheap), sonnet for depth (better quality)
-DEFAULT_MODEL = config('CLAUDE_MODEL', default='claude-3-5-haiku-20241022')
+GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
+DEFAULT_MODEL = config('GEMINI_MODEL', default='gemini-2.5-flash')
 
 MAX_DIFF_CHARS = 60_000   # Truncate very large diffs to stay within context
 MAX_TOKENS = 4096
@@ -159,6 +165,9 @@ def _extract_json(text: str) -> dict:
     Robustly extract a JSON object from LLM output.
     Handles cases where the model wraps JSON in markdown code fences.
     """
+    if not text:
+        raise ValueError("Empty LLM response received")
+
     # Try direct parse first
     try:
         return json.loads(text.strip())
@@ -199,7 +208,7 @@ def run_llm_review(
     model: Optional[str] = None,
 ) -> ReviewResult:
     """
-    Send the PR diff to Claude and get back a structured ReviewResult.
+    Send the PR diff to Google Gemini and get back a structured ReviewResult.
 
     Args:
         pr_title        : Title of the pull request
@@ -209,22 +218,27 @@ def run_llm_review(
         head_branch     : e.g. "feature/my-feature"
         diff            : Raw unified diff string from GitHub API
         changed_files   : List of changed filenames
-        model           : Override the default Claude model
+        model           : Override the default Gemini model
 
     Returns:
         ReviewResult with summary, verdict, and list of ReviewComment objects.
 
     Raises:
-        ValueError  : If the LLM response cannot be parsed as valid JSON
-        anthropic.APIError : On API call failure
+        ValueError  : If API key missing, google-genai not installed, or JSON parsing fails
+        Exception   : On API call failure
     """
-    if not ANTHROPIC_API_KEY:
+    if not GEMINI_AVAILABLE:
         raise ValueError(
-            "ANTHROPIC_API_KEY is not set in .env. "
-            "Get one at https://console.anthropic.com/"
+            "google-genai package is not installed. Run: pip install google-genai"
         )
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key_here":
+        raise ValueError(
+            "GEMINI_API_KEY is not set in .env. "
+            "Get a free API key at https://aistudio.google.com/"
+        )
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
     model_name = model or DEFAULT_MODEL
 
     user_prompt = _build_user_prompt(
@@ -238,20 +252,26 @@ def run_llm_review(
     )
 
     logger.info(
-        f"Sending PR '{pr_title}' to {model_name} | "
+        f"Sending PR '{pr_title}' to Gemini model {model_name} | "
         f"diff={len(diff)} chars | files={len(changed_files)}"
     )
 
-    message = client.messages.create(
+    config_kwargs = {}
+    if types is not None:
+        config_kwargs["config"] = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.2,
+            max_output_tokens=MAX_TOKENS,
+            response_mime_type="application/json",
+        )
+
+    response = client.models.generate_content(
         model=model_name,
-        max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": user_prompt}
-        ],
+        contents=user_prompt,
+        **config_kwargs
     )
 
-    raw_text = message.content[0].text
+    raw_text = response.text or ""
     logger.debug(f"LLM raw response ({len(raw_text)} chars): {raw_text[:300]}...")
 
     # Parse structured output
@@ -364,7 +384,8 @@ def format_pr_summary(result: ReviewResult) -> str:
     lines += [
         "",
         "---",
-        "*Reviewed by GitHub AI Bot — powered by Anthropic Claude*",
+        "*Reviewed by GitHub AI Bot — powered by Google Gemini*",
     ]
 
     return "\n".join(lines)
+
