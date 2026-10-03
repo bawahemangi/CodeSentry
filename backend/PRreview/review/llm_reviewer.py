@@ -127,14 +127,23 @@ def _build_user_prompt(
     head_branch: str,
     diff: str,
     changed_files: list[str],
+    ast_summary: str = "",
 ) -> str:
-    """Construct the user-turn prompt with all PR context."""
+    """Construct the user-turn prompt with all PR context.
+
+    Args:
+        ast_summary : Optional block of tree-sitter AST findings to inject
+                      before the diff so the LLM can reference them.
+    """
 
     # Truncate diff if too large
     if len(diff) > MAX_DIFF_CHARS:
         diff = diff[:MAX_DIFF_CHARS] + "\n\n[... diff truncated due to size ...]"
 
     files_list = "\n".join(f"  - {f}" for f in changed_files)
+
+    # Optionally prepend the AST analysis block
+    ast_block = f"\n{ast_summary}\n" if ast_summary else ""
 
     return f"""\
 ## Pull Request Details
@@ -146,7 +155,7 @@ def _build_user_prompt(
 
 ## Changed Files
 {files_list}
-
+{ast_block}
 ## Unified Diff
 ```diff
 {diff}
@@ -206,6 +215,7 @@ def run_llm_review(
     diff: str,
     changed_files: list[str],
     model: Optional[str] = None,
+    ast_summary: str = "",
 ) -> ReviewResult:
     """
     Send the PR diff to Google Gemini and get back a structured ReviewResult.
@@ -219,6 +229,8 @@ def run_llm_review(
         diff            : Raw unified diff string from GitHub API
         changed_files   : List of changed filenames
         model           : Override the default Gemini model
+        ast_summary     : Pre-formatted tree-sitter findings block to inject
+                          into the prompt (from ast_checker.format_ast_findings_for_prompt)
 
     Returns:
         ReviewResult with summary, verdict, and list of ReviewComment objects.
@@ -249,6 +261,7 @@ def run_llm_review(
         head_branch=head_branch,
         diff=diff,
         changed_files=changed_files,
+        ast_summary=ast_summary,
     )
 
     logger.info(

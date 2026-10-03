@@ -23,3 +23,7 @@ cryptography==42.0.8
 # LLM (Google Gemini - Free Tier)
 google-genai==0.3.0
 
+# AST analysis (tree-sitter)
+tree-sitter==0.26.0
+tree-sitter-python==0.25.0
+

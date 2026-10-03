@@ -23,6 +23,14 @@ from .llm_reviewer import (
     format_comment_body,
     format_pr_summary,
     ReviewResult,
+    ReviewComment,
+)
+from .ast_checker import (
+    analyze_changed_files,
+    format_ast_findings_for_prompt,
+    ASTFinding,
+    detect_language,
+    SUPPORTED_LANGUAGES,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +78,33 @@ def _fetch_changed_files(token: str, repo_full_name: str, pr_number: int) -> lis
     resp = requests.get(url, headers=_gh_headers(token), timeout=15)
     resp.raise_for_status()
     return [f["filename"] for f in resp.json()]
+
+
+def _fetch_file_content(
+    token: str,
+    repo_full_name: str,
+    filename: str,
+    ref: str,
+) -> Optional[str]:
+    """
+    Fetch the raw text content of a file at a given git ref (commit SHA / branch).
+    Returns None if the file does not exist at that ref (e.g. newly created but empty,
+    or deleted file).
+    """
+    url = f"{GITHUB_API}/repos/{repo_full_name}/contents/{filename}"
+    resp = requests.get(
+        url,
+        headers={
+            **_gh_headers(token),
+            "Accept": "application/vnd.github.raw+json",
+        },
+        params={"ref": ref},
+        timeout=15,
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.text
 
 
 def _post_review(
@@ -142,6 +177,15 @@ def run_pr_review(
 
     Returns:
         dict with review summary, verdict, comment count, and github_response.
+
+    Pipeline steps:
+        1. Authenticate
+        2. Fetch diff + changed files
+        3. Run tree-sitter AST analysis on supported files (Python)
+        4. Send diff + AST context to Gemini LLM
+        5. Map LLM comment line numbers → GitHub diff positions
+        6. Merge AST findings as additional inline comments
+        7. Post everything to GitHub in one review API call
     """
     logger.info(
         f"[PR Review] Starting review for {repo_full_name}#{pr_number} "
@@ -164,8 +208,38 @@ def run_pr_review(
     # ── Step 3: Parse diff → position map ────────────────────────────────────
     file_maps = parse_diff(raw_diff)
 
+    # ── Step 3b: Tree-sitter AST analysis ────────────────────────────────────
+    ast_findings: list[ASTFinding] = []
+    ast_reports = []
+
+    # Fetch source content for each file that tree-sitter can analyse
+    supported_files = [f for f in changed_files if detect_language(f) in SUPPORTED_LANGUAGES]
+    if supported_files:
+        logger.info(f"[PR Review] Running AST analysis on {len(supported_files)} file(s)")
+        file_contents: dict[str, str] = {}
+        for filename in supported_files:
+            try:
+                content = _fetch_file_content(
+                    token, repo_full_name, filename, ref=commit_id
+                )
+                if content is not None:
+                    file_contents[filename] = content
+            except Exception as e:
+                logger.warning(f"[PR Review] Could not fetch {filename} for AST: {e}")
+
+        if file_contents:
+            ast_reports = analyze_changed_files(file_contents)
+            ast_findings = [f for r in ast_reports for f in r.findings]
+            logger.info(f"[PR Review] AST: {len(ast_findings)} findings across {len(ast_reports)} file(s)")
+
+    # Build AST summary block to inject into LLM prompt
+    ast_summary = format_ast_findings_for_prompt(ast_reports)
+
+    # If any file has a SYNTAX_ERROR, escalate verdict to request_changes
+    has_syntax_error = any(f.check == "SYNTAX_ERROR" for f in ast_findings)
+
     # ── Step 4: LLM Review ───────────────────────────────────────────────────
-    logger.info(f"[PR Review] Sending to LLM...")
+    logger.info(f"[PR Review] Sending to LLM (AST context injected)...")
     result: ReviewResult = run_llm_review(
         pr_title=pr_title,
         pr_description=pr_description,
@@ -174,9 +248,15 @@ def run_pr_review(
         head_branch=head_branch,
         diff=raw_diff,
         changed_files=changed_files,
+        ast_summary=ast_summary,
     )
 
-    # ── Step 5: Map line numbers → diff positions ─────────────────────────────
+    # If syntax errors detected by AST, force verdict to request_changes
+    if has_syntax_error and result.verdict == "approve":
+        result.verdict = "request_changes"
+        logger.warning("[PR Review] Overriding LLM verdict to request_changes due to syntax errors")
+
+    # ── Step 5: Map LLM line numbers → diff positions ─────────────────────────
     github_comments = []
     skipped_comments = 0
 
@@ -202,16 +282,60 @@ def run_pr_review(
             "body": format_comment_body(comment),
         })
 
+    # ── Step 6: Add AST findings as additional inline comments ────────────────
+    ast_comments_posted = 0
+    _SEVERITY_EMOJI = {"critical": "🔴", "warning": "🟡", "suggestion": "🔵"}
+    _CATEGORY_EMOJI = {"bug": "🐛", "security": "🔒", "performance": "⚡",
+                       "style": "🎨", "logic": "🧠", "docs": "📝"}
+
+    for finding in ast_findings:
+        position = get_position_for_new_line(file_maps, finding.file, finding.line)
+        if position is None:
+            logger.debug(
+                f"[PR Review] AST finding at {finding.file}:{finding.line} "
+                f"not in diff — skipping as inline comment"
+            )
+            continue
+
+        sev_emoji = _SEVERITY_EMOJI.get(finding.severity, "💬")
+        cat_emoji = _CATEGORY_EMOJI.get(finding.category, "")
+        body = (
+            f"{sev_emoji} **[AST] {finding.title}**\n\n"
+            f"{cat_emoji} _{finding.category.capitalize()}_ · "
+            f"_{finding.severity.capitalize()}_ · "
+            f"`tree-sitter/{finding.check}`\n\n"
+            f"{finding.body}"
+        )
+        github_comments.append({
+            "path": finding.file,
+            "position": position,
+            "body": body,
+        })
+        ast_comments_posted += 1
+
     logger.info(
-        f"[PR Review] {len(github_comments)} comments will be posted "
-        f"({skipped_comments} skipped — not in diff)"
+        f"[PR Review] {len(github_comments)} total comments will be posted "
+        f"({skipped_comments} LLM skipped · {ast_comments_posted} AST inline)"
     )
 
-    # ── Step 6: Format PR review summary ─────────────────────────────────────
+    # ── Step 7: Format PR review summary ─────────────────────────────────────
     review_body = format_pr_summary(result)
+    # Append AST stats to review body if there were AST findings
+    if ast_findings:
+        critical_count = sum(1 for f in ast_findings if f.severity == "critical")
+        warning_count  = sum(1 for f in ast_findings if f.severity == "warning")
+        suggestion_count = sum(1 for f in ast_findings if f.severity == "suggestion")
+        ast_line = (
+            f"\n\n**🔍 Static Analysis (tree-sitter):** "
+            f"🔴 {critical_count} critical · "
+            f"🟡 {warning_count} warning · "
+            f"🔵 {suggestion_count} suggestion"
+        )
+        review_body += ast_line
+
     github_event = _VERDICT_TO_EVENT.get(result.verdict, "COMMENT")
 
-    # ── Step 7: Post to GitHub ────────────────────────────────────────────────
+    # ── Step 8: Post to GitHub ────────────────────────────────────────────────
     if dry_run:
         logger.info("[PR Review] DRY RUN — skipping GitHub post")
         return {
@@ -246,6 +370,8 @@ def run_pr_review(
         "summary": result.summary,
         "comments_count": len(github_comments),
         "skipped_count": skipped_comments,
+        "ast_findings_count": len(ast_findings),
+        "ast_comments_posted": ast_comments_posted,
         "model_used": result.model_used,
         "github_review_id": gh_response.get("id"),
         "github_review_url": gh_response.get("html_url"),
