@@ -68,14 +68,53 @@ def github_webhook(request):
                         logger.info(
                             f"Review posted for PR #{pr['number']}: "
                             f"verdict={review_result.get('verdict')} "
+                            f"score={review_result.get('health_score')} "
+                            f"grade={review_result.get('health_grade')} "
                             f"comments={review_result.get('comments_count')}"
                         )
+
+                        # Best-effort DB persistence if DB is connected
+                        try:
+                            from .models import Repository, PullRequest, Review
+                            repo_obj, _ = Repository.objects.get_or_create(
+                                full_name=repo.get("full_name", ""),
+                                defaults={
+                                    "name": repo.get("name", ""),
+                                    "github_url": repo.get("html_url", ""),
+                                    "owner": repo.get("owner", {}).get("login", ""),
+                                }
+                            )
+                            pr_obj, _ = PullRequest.objects.get_or_create(
+                                repository=repo_obj,
+                                number=pr.get("number"),
+                                defaults={
+                                    "github_pr_id": pr.get("id", 0),
+                                    "title": pr.get("title", "")[:300],
+                                    "author": pr.get("user", {}).get("login", ""),
+                                    "source_branch": pr.get("head", {}).get("ref", ""),
+                                    "target_branch": pr.get("base", {}).get("ref", ""),
+                                    "status": pr.get("state", "open"),
+                                }
+                            )
+                            Review.objects.create(
+                                pull_request=pr_obj,
+                                status=review_result.get("verdict", "comment"),
+                                summary=review_result.get("summary", ""),
+                                health_score=review_result.get("health_score"),
+                                health_grade=review_result.get("health_grade", ""),
+                                risk_level=review_result.get("risk_level", ""),
+                                health_details=review_result.get("health_report"),
+                            )
+                        except Exception as db_err:
+                            logger.warning(f"Could not persist review to DB (DB offline/disabled): {db_err}")
+
                     except Exception as e:
                         logger.error(
                             f"PR review failed for {repo.get('full_name')}#{pr.get('number')}: {e}",
                             exc_info=True,
                         )
                         # Don't return 500 — GitHub expects 200 for delivery tracking
+
 
             elif event_type == "ping":
                 logger.info("Received ping event from GitHub App installation.")

@@ -26,7 +26,11 @@ SECRET_KEY = 'django-insecure-qhh(e%57@5odz1g36lot(20-n^&k%97680evqxk!(iql!_yav&
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '.ngrok-free.app', '.smee.io']
+
+# Default primary key type (silences W042 warnings)
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
 
 
 # Application definition

@@ -46,10 +46,17 @@ class Review(models.Model):
 
     summary = models.TextField(blank=True)
 
+    # Health Scoring Fields
+    health_score = models.IntegerField(null=True, blank=True)
+    health_grade = models.CharField(max_length=10, blank=True)
+    risk_level = models.CharField(max_length=50, blank=True)
+    health_details = models.JSONField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Review for PR #{self.pull_request.number}"
+        return f"Review for PR #{self.pull_request.number} ({self.health_grade or 'Pending'})"
+
 
 
 class Finding(models.Model):

@@ -32,6 +32,11 @@ from .ast_checker import (
     detect_language,
     SUPPORTED_LANGUAGES,
 )
+from .health_scorer import (
+    calculate_health_score,
+    format_health_score_markdown,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -318,8 +323,25 @@ def run_pr_review(
         f"({skipped_comments} LLM skipped · {ast_comments_posted} AST inline)"
     )
 
-    # ── Step 7: Format PR review summary ─────────────────────────────────────
-    review_body = format_pr_summary(result)
+    # ── Step 7: Calculate Health Score & Format PR Summary ─────────────────────
+    health_report = calculate_health_score(
+        changed_files=changed_files,
+        raw_diff=raw_diff,
+        pr_title=pr_title,
+        pr_description=pr_description,
+        ast_findings=ast_findings,
+        llm_comments=result.comments,
+    )
+
+    logger.info(
+        f"[PR Review] Health Score calculated: {health_report.score}/100 "
+        f"(Grade: {health_report.grade}, Risk: {health_report.risk_level})"
+    )
+
+    # Build review body with health widget at top
+    health_widget = format_health_score_markdown(health_report)
+    review_body = f"{health_widget}\n\n" + format_pr_summary(result)
+
     # Append AST stats to review body if there were AST findings
     if ast_findings:
         critical_count = sum(1 for f in ast_findings if f.severity == "critical")
@@ -342,6 +364,10 @@ def run_pr_review(
             "dry_run": True,
             "verdict": result.verdict,
             "summary": result.summary,
+            "health_score": health_report.score,
+            "health_grade": health_report.grade,
+            "risk_level": health_report.risk_level,
+            "health_report": health_report.to_dict(),
             "comments_count": len(github_comments),
             "skipped_count": skipped_comments,
             "model_used": result.model_used,
@@ -362,12 +388,16 @@ def run_pr_review(
 
     logger.info(
         f"[PR Review] ✅ Review posted! review_id={gh_response.get('id')} "
-        f"verdict={result.verdict} comments={len(github_comments)}"
+        f"verdict={result.verdict} score={health_report.score} comments={len(github_comments)}"
     )
 
     return {
         "verdict": result.verdict,
         "summary": result.summary,
+        "health_score": health_report.score,
+        "health_grade": health_report.grade,
+        "risk_level": health_report.risk_level,
+        "health_report": health_report.to_dict(),
         "comments_count": len(github_comments),
         "skipped_count": skipped_comments,
         "ast_findings_count": len(ast_findings),
@@ -376,3 +406,4 @@ def run_pr_review(
         "github_review_id": gh_response.get("id"),
         "github_review_url": gh_response.get("html_url"),
     }
+
