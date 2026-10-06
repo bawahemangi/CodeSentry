@@ -3,8 +3,12 @@ Django==5.2.17
 asgiref==3.10.0
 sqlparse==0.5.3
 
+# Authentication & Social Account Integration (GitHub OAuth)
+django-allauth==65.19.7
+
 # Environment variable management
 python-decouple==3.8
+python-dotenv==1.2.3
 
 # PostgreSQL database driver
 psycopg2-binary==2.9.13
@@ -26,4 +30,5 @@ google-genai==0.3.0
 # AST analysis (tree-sitter)
 tree-sitter==0.26.0
 tree-sitter-python==0.25.0
+
 
