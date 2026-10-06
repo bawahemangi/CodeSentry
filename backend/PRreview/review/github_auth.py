@@ -11,12 +11,14 @@ import jwt
 import requests
 from decouple import config
 
-GITHUB_APP_ID = config('GITHUB_APP_ID')
-GITHUB_PRIVATE_KEY_PATH = config('GITHUB_PRIVATE_KEY_PATH')
+GITHUB_APP_ID = config('GITHUB_APP_ID', default='')
+GITHUB_PRIVATE_KEY_PATH = config('GITHUB_PRIVATE_KEY_PATH', default='')
 
 
 def _load_private_key() -> str:
     """Read the PEM private key from disk."""
+    if not GITHUB_PRIVATE_KEY_PATH:
+        raise ValueError("GITHUB_PRIVATE_KEY_PATH is not set in .env")
     with open(GITHUB_PRIVATE_KEY_PATH, 'r') as f:
         return f.read()
 
@@ -26,6 +28,8 @@ def get_jwt_token() -> str:
     Generate a short-lived JWT (max 10 min) for GitHub App API calls.
     Must be called before any App-level endpoint.
     """
+    if not GITHUB_APP_ID:
+        raise ValueError("GITHUB_APP_ID is not set in .env")
     private_key = _load_private_key()
     now = int(time.time())
     payload = {
